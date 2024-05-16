@@ -2,9 +2,18 @@
 export class GDBEvent<T extends string = string> {
     public readonly eventType: T;
     public readonly data: string[];
+    private handled: boolean = false;
 
     constructor (parts: string[]) {
         [this.eventType, ...this.data] = parts as [T, ...string[]];
+    }
+
+    public get isHandled () {
+        return this.handled;
+    }
+
+    public stopPropagation () {
+        this.handled = true;
     }
 }
 
@@ -25,7 +34,19 @@ export enum StatusTypes {
 
 export class StatusEvent extends GDBEvent<StatusTypes> {}
 
-export class StreamEvent extends GDBEvent {}
+export enum StreamTypes {
+    CONSOLE = "console",
+    TARGET = "target",
+    INTERNAL = "internal"
+}
+
+export const StreamMappingTable: Record<string, StreamTypes> = {
+    "~" : StreamTypes.CONSOLE,
+    "@" : StreamTypes.TARGET,
+    "&" : StreamTypes.INTERNAL
+}
+
+export class StreamEvent extends GDBEvent<StreamTypes> {}
 
 export enum ActivityTypes {
     THREAD_GROUP_ADDED = "thread-group-added",

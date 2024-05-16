@@ -1,14 +1,27 @@
 import * as child_process from "node:child_process";
 import * as readline from "node:readline";
 import {Writable} from "node:stream";
-import {TypedEventEmitter} from "./typedEventEmitter";
-import {ActivityEvent, GDBEvent, GDBEventMap, ResultEvent, StatusEvent, StreamEvent} from "./gdbEvents";
+import {TypedEventEmitter} from "./typedEventEmitter.js";
+import {
+    ActivityEvent,
+    GDBEvent,
+    GDBEventMap,
+    ResultEvent,
+    ResultTypes,
+    StatusEvent,
+    StreamEvent,
+    StreamMappingTable,
+    StreamTypes
+} from "./gdbEvents.js";
+import {log} from "node:util";
+import * as util from "node:util";
 
 interface Options {
     spawn: child_process.SpawnOptions,
     gdbExecutable: string,
-    exitHandler: () => {},
-    debug: boolean
+    exitHandler: () => never,
+    debug: boolean,
+    readyCallback: () => any
 }
 
 export class GDB {
@@ -17,7 +30,14 @@ export class GDB {
     private readonly stdin: Writable;
     private readonly emitter: TypedEventEmitter<GDBEventMap>;
 
-    constructor (target: string, args: string | string[] = [], options: Partial<Options>) {
+    private collecting: boolean = false;
+    private collector: string[][] = [];
+    private stack: [(event: ResultEvent) => any, (reason: string) => any][] = [];  // resolve, reject
+
+    private ready: boolean = false;
+    private readonly readyCallback: () => any;
+
+    constructor (target: string, args: string | string[] = [], options: Partial<Options> = {}) {
         let fullOptions: Options = {
             spawn: {},
             gdbExecutable: "gdb",
@@ -25,8 +45,10 @@ export class GDB {
                 process.exit();
             },
             debug: false,
+            readyCallback: () => {},
             ...options
         };
+        this.readyCallback = fullOptions.readyCallback;
 
         if (typeof args === "string") {
             args = args.split(" ");
@@ -39,15 +61,14 @@ export class GDB {
             {stdio: ["pipe", "pipe", "inherit"], ...options.spawn}
         );
 
-        this.stdin = this.process.stdin!;
-        if (fullOptions.debug) {
-            this.process.stdout?.on("data", process.stdout.write);
-        }
-        this.stdout = readline.createInterface(this.process.stdout!);
-        this.stdout.on("line", this.processLine);
-        this.process.on("exit", fullOptions.exitHandler);
-
         this.emitter = new TypedEventEmitter();
+        this.stdin = this.process.stdin!;
+        this.stdout = readline.createInterface(this.process.stdout!);
+        if (fullOptions.debug) {
+            this.stdout.on("line", console.log);
+        }
+        this.stdout.on("line", this.processLine.bind(this));
+        this.process.on("exit", fullOptions.exitHandler);
     }
 
     public get gdbProcess () {
@@ -74,47 +95,77 @@ export class GDB {
             case "^":
                 event = new ResultEvent(parts);
                 this.emitter.emit("result", event);
+                if (event.isHandled) break;
                 this.processResult(event);
                 break;
+
             case "*":
                 event = new StatusEvent(parts);
                 this.emitter.emit("status", event);
+                if (event.isHandled) break;
                 this.processStatus(event);
                 break;
+
             case "~":
             case "&":
             case "@":
+                parts.unshift(StreamMappingTable[line[0]]);
                 event = new StreamEvent(parts);
                 this.emitter.emit("stream", event);
+                if (event.isHandled) break;
                 this.processStream(event);
                 break;
+
             case "=":
                 event = new ActivityEvent(parts);
                 this.emitter.emit("activity", event);
+                if (event.isHandled) break;
                 this.processActivity(event);
                 break;
+
             case "(":
-                break;
+                if (this.ready) return;
+
+                this.ready = true;
+                this.emitter.emit("ready");
+                this.readyCallback();
+                return;
+
             default:
                 console.error("Encountered unknown record: " + line);
+                return;
         }
+
+        this.emitter.emit("all", event);
     }
 
     private processResult (event: ResultEvent) {
+        if (event.eventType === ResultTypes.EXIT) {
+            return;
+        }
 
+        if (this.stack.length === 0) {
+            console.error("Received result for non-existent command");
+            return;
+        }
+
+        if (event.eventType === ResultTypes.ERROR) {
+            this.stack.pop()![1](event.data.join(" // "));
+            return;
+        }
+
+        this.stack.pop()![0](event);
     }
 
-    private processStatus (event: StatusEvent) {
-
-    }
+    private processStatus (event: StatusEvent) {}
 
     private processStream (event: StreamEvent) {
-
+        if (this.collecting && event.eventType === StreamTypes.CONSOLE) {
+            this.collector.push(event.data);
+        }
     }
 
-    private processActivity (event: ActivityEvent) {
-
-    }
+    private processActivity (event: ActivityEvent) {}
 
 
     // ---------------------------------- execution interface
@@ -129,21 +180,37 @@ export class GDB {
 
     public async execute (command: string) {
         this.writeCommand(command);
-
-        // register return to stack
+        return new Promise<ResultEvent>((resolve, reject) => this.stack.push([resolve, reject]));
     }
     public ex = this.execute;
 
     public async collect_execute (command: string) {
+        if (this.collecting) return Promise.reject("Another collection command is active");
+
         this.writeCommand(command);
+        this.collecting = true;
 
-        // register
-        // enable collection mode
-        // lock stack until done
+        return new Promise<[ResultEvent, string[][]]>((resolve, reject) => {
+            this.stack.push([
+                (event) => {
+                    this.collecting = false;
+                    let cpy = structuredClone(this.collector);
+                    this.collector = [];
+
+                    resolve([event, cpy]);
+                },
+                (reason) => {
+                    this.collecting = false;
+                    this.collector = [];
+
+                    reject(reason);
+                }
+            ]);
+        })
     }
-    public cex = this.collect_execute;
+    public exc = this.collect_execute;
 
-    // write content such as a process requesting from stdin
+    // write raw content such as a process requesting from stdin
     public external_write (data: string) {
         this.writeCommand(data);
     }
