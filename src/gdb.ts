@@ -130,7 +130,7 @@ export class GDB {
                 return;
 
             default:
-                console.error("Encountered unknown record: " + line);
+                this.emitter.emit("other", line);
                 return;
         }
     }

@@ -7,7 +7,8 @@ export interface GDBEventMap extends Record<string | symbol, any[]> {
     stream: [StreamEvent],
     activity: [ActivityEvent],
     all: [GDBEvent],
-    ready: []
+    ready: [],
+    other: [string]
 }
 
 export class GDBEventEmitter extends TypedEventEmitter<GDBEventMap> {
@@ -18,7 +19,7 @@ export class GDBEventEmitter extends TypedEventEmitter<GDBEventMap> {
     }
 
     private wrapListener <E extends EK<GDBEventMap>>(eventName: E, listener: Listener<GDBEventMap, E>): Listener<GDBEventMap, E> {
-        if (eventName === "ready") return listener;
+        if (eventName === "ready" || eventName === "other") return listener;
 
         return (...args) => {
             if (args[0].isHandled) return;
