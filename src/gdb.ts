@@ -3,7 +3,7 @@ import * as readline from "node:readline";
 import {Writable} from "node:stream";
 import {
     ActivityEvent,
-    GDBEvent,
+    GDBEvent, GDBEventMap,
     ResultEvent,
     ResultTypes,
     StatusEvent,
@@ -11,7 +11,7 @@ import {
     StreamMappingTable,
     StreamTypes
 } from "./gdbEvents.js";
-import {GDBEventEmitter} from "./gdbEventEmitter.js";
+import {TypedEventEmitter} from "./typedEventEmitter.js";
 
 interface Options {
     spawn: child_process.SpawnOptions,
@@ -25,10 +25,13 @@ export class GDB {
     private readonly process: child_process.ChildProcess;
     private readonly stdout: readline.Interface;
     private readonly stdin: Writable;
-    private readonly emitter: GDBEventEmitter;
+    private readonly emitter: TypedEventEmitter<GDBEventMap>;
 
     private collecting: boolean = false;
     private collector: string[][] = [];
+    private collectingProcessOut: boolean = false;
+    private processOutCollector: string[] = [];
+
     private stack: [(event: ResultEvent | StatusEvent) => any, (reason: string) => any][] = [];  // resolve, reject
 
     private ready: boolean = false;
@@ -58,12 +61,7 @@ export class GDB {
             {stdio: ["pipe", "pipe", "inherit"], ...options.spawn}
         );
 
-        this.emitter = new GDBEventEmitter();
-        this.emitter.registerFinalListener("result", this.processResult.bind(this));
-        this.emitter.registerFinalListener("status", this.processStatus.bind(this));
-        this.emitter.registerFinalListener("stream", this.processStream.bind(this));
-        this.emitter.registerFinalListener("activity", this.processActivity.bind(this));
-
+        this.emitter = new TypedEventEmitter<GDBEventMap>();
         this.stdin = this.process.stdin!;
         this.stdout = readline.createInterface(this.process.stdout!);
         if (fullOptions.debug) {
@@ -81,7 +79,7 @@ export class GDB {
         return this.emitter;
     }
 
-    public exit () : never {
+    public exit (): never {
         this.process.kill();
         process.exit();
     }
@@ -96,14 +94,14 @@ export class GDB {
         switch (line[0]) {
             case "^":
                 event = new ResultEvent(parts);
-                this.emitter.emit("all", event);
                 this.emitter.emit("result", event);
+                this.processResult(event);
                 break;
 
             case "*":
                 event = new StatusEvent(parts);
-                this.emitter.emit("all", event);
                 this.emitter.emit("status", event);
+                this.processStatus(event);
                 break;
 
             case "~":
@@ -111,14 +109,14 @@ export class GDB {
             case "@":
                 parts.unshift(StreamMappingTable[line[0]]);
                 event = new StreamEvent(parts);
-                this.emitter.emit("all", event);
                 this.emitter.emit("stream", event);
+                this.processStream(event);
                 break;
 
             case "=":
                 event = new ActivityEvent(parts);
-                this.emitter.emit("all", event);
                 this.emitter.emit("activity", event);
+                this.processActivity(event);
                 break;
 
             case "(":
@@ -131,21 +129,31 @@ export class GDB {
 
             default:
                 this.emitter.emit("other", line);
+                if (this.collectingProcessOut) {
+                    this.processOutCollector.push(line);
+                }
                 return;
         }
+
+        this.emitter.emit("any", event);
     }
 
     private notifyCaller (event: ResultEvent | StatusEvent) {
-        if (this.stack.length === 0) {
-            return;
+        if (this.collectingProcessOut) {
+            event.other = structuredClone(this.processOutCollector);
+            this.processOutCollector = [];
+            this.collectingProcessOut = false;
         }
-
         this.stack.pop()![0](event);
     }
 
     private processResult (event: ResultEvent) {
         // note: running is deprecated
         if (event.eventType === ResultTypes.EXIT || event.eventType === ResultTypes.RUNNING) {
+            return;
+        }
+
+        if (this.stack.length === 0) {
             return;
         }
 
@@ -158,6 +166,10 @@ export class GDB {
     }
 
     private processStatus (event: StatusEvent) {
+        if (this.stack.length === 0) {
+            return;
+        }
+
         this.notifyCaller(event);
     }
 
@@ -180,17 +192,20 @@ export class GDB {
         }
     }
 
-    public async execute (command: string) {
+    public async execute (command: string, collectProcessOut: boolean = false) {
+        this.collectingProcessOut = collectProcessOut;
         this.writeCommand(command);
+
         return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
     }
     public ex = this.execute;
 
-    public async collect_execute (command: string) {
+    public async collect_execute (command: string, collectProcessOut: boolean = false) {
         if (this.collecting) return Promise.reject("Another collection command is active");
 
-        this.writeCommand(command);
         this.collecting = true;
+        this.collectingProcessOut = collectProcessOut;
+        this.writeCommand(command);
 
         return new Promise<[ResultEvent | StatusEvent, string[][]]>((resolve, reject) => {
             this.stack.push([
@@ -212,7 +227,8 @@ export class GDB {
     }
     public exc = this.collect_execute;
 
-    public async next_stop () {
+    public async next_stop (collectProcessOut: boolean = false) {
+        this.collectingProcessOut = collectProcessOut;
         return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
     }
     public ns = this.next_stop;

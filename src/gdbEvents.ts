@@ -2,18 +2,10 @@
 export class GDBEvent<T extends string = string> {
     public readonly eventType: T;
     public readonly data: string[];
-    private handled: boolean = false;
+    public other?: string[];
 
     constructor (parts: string[]) {
         [this.eventType, ...this.data] = parts as [T, ...string[]];
-    }
-
-    public get isHandled () {
-        return this.handled;
-    }
-
-    public consume () {
-        this.handled = true;
     }
 }
 
@@ -72,4 +64,14 @@ export enum ActivityTypes {
 }
 
 export class ActivityEvent extends GDBEvent<ActivityTypes> {}
+
+export interface GDBEventMap extends Record<string | symbol, any[]> {
+    result: [ResultEvent],
+    status: [StatusEvent],
+    stream: [StreamEvent],
+    activity: [ActivityEvent],
+    any: [GDBEvent],
+    ready: [],
+    processOut: [string]
+}
 
