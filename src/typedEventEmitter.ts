@@ -1,7 +1,7 @@
 import EventEmitter from "node:events";
 
-type KeyType = string | symbol;
-type EK<T> = Extract<keyof T, KeyType>;
+export type KeyType = string | symbol;
+export type EK<T> = Extract<keyof T, KeyType>;
 export type EventMap = Record<KeyType, any[]>;
 export type Listener<T extends EventMap, E extends EK<T>> = (...args: T[E]) => any;
 

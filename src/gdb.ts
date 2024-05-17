@@ -1,11 +1,9 @@
 import * as child_process from "node:child_process";
 import * as readline from "node:readline";
 import {Writable} from "node:stream";
-import {TypedEventEmitter} from "./typedEventEmitter.js";
 import {
     ActivityEvent,
     GDBEvent,
-    GDBEventMap,
     ResultEvent,
     ResultTypes,
     StatusEvent,
@@ -13,8 +11,7 @@ import {
     StreamMappingTable,
     StreamTypes
 } from "./gdbEvents.js";
-import {log} from "node:util";
-import * as util from "node:util";
+import {GDBEventEmitter} from "./gdbEventEmitter.js";
 
 interface Options {
     spawn: child_process.SpawnOptions,
@@ -28,7 +25,7 @@ export class GDB {
     private readonly process: child_process.ChildProcess;
     private readonly stdout: readline.Interface;
     private readonly stdin: Writable;
-    private readonly emitter: TypedEventEmitter<GDBEventMap>;
+    private readonly emitter: GDBEventEmitter;
 
     private collecting: boolean = false;
     private collector: string[][] = [];
@@ -61,7 +58,12 @@ export class GDB {
             {stdio: ["pipe", "pipe", "inherit"], ...options.spawn}
         );
 
-        this.emitter = new TypedEventEmitter();
+        this.emitter = new GDBEventEmitter();
+        this.emitter.registerFinalListener("result", this.processResult.bind(this));
+        this.emitter.registerFinalListener("status", this.processStatus.bind(this));
+        this.emitter.registerFinalListener("stream", this.processStream.bind(this));
+        this.emitter.registerFinalListener("activity", this.processActivity.bind(this));
+
         this.stdin = this.process.stdin!;
         this.stdout = readline.createInterface(this.process.stdout!);
         if (fullOptions.debug) {
@@ -94,16 +96,14 @@ export class GDB {
         switch (line[0]) {
             case "^":
                 event = new ResultEvent(parts);
+                this.emitter.emit("all", event);
                 this.emitter.emit("result", event);
-                if (event.isHandled) break;
-                this.processResult(event);
                 break;
 
             case "*":
                 event = new StatusEvent(parts);
+                this.emitter.emit("all", event);
                 this.emitter.emit("status", event);
-                if (event.isHandled) break;
-                this.processStatus(event);
                 break;
 
             case "~":
@@ -111,16 +111,14 @@ export class GDB {
             case "@":
                 parts.unshift(StreamMappingTable[line[0]]);
                 event = new StreamEvent(parts);
+                this.emitter.emit("all", event);
                 this.emitter.emit("stream", event);
-                if (event.isHandled) break;
-                this.processStream(event);
                 break;
 
             case "=":
                 event = new ActivityEvent(parts);
+                this.emitter.emit("all", event);
                 this.emitter.emit("activity", event);
-                if (event.isHandled) break;
-                this.processActivity(event);
                 break;
 
             case "(":
@@ -135,8 +133,6 @@ export class GDB {
                 console.error("Encountered unknown record: " + line);
                 return;
         }
-
-        this.emitter.emit("all", event);
     }
 
     private processResult (event: ResultEvent) {

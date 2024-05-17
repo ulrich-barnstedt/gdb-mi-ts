@@ -12,7 +12,7 @@ export class GDBEvent<T extends string = string> {
         return this.handled;
     }
 
-    public stopPropagation () {
+    public consume () {
         this.handled = true;
     }
 }
@@ -73,9 +73,3 @@ export enum ActivityTypes {
 
 export class ActivityEvent extends GDBEvent<ActivityTypes> {}
 
-export interface GDBEventMap extends Record<string | symbol, any[]> {
-    result: [ResultEvent],
-    status: [StatusEvent],
-    stream: [StreamEvent],
-    activity: [ActivityEvent]
-}
