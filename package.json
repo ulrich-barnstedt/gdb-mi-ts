@@ -1,7 +1,7 @@
 {
-    "name": "gdb-mi3",
-    "version": "1.0.0",
-    "description": "",
+    "name": "gdb-mi-ts",
+    "version": "1.1.0",
+    "description": "Thin wrapper around gdb's mi3 (and newer) interface",
     "main": "build/index.js",
     "scripts": {
         "build": "tsc --build",
