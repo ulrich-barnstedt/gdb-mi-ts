@@ -16,9 +16,9 @@ import {TypedEventEmitter} from "./typedEventEmitter.js";
 interface Options {
     spawn: child_process.SpawnOptions,
     gdbExecutable: string,
-    exitHandler: () => never,
     debug: boolean,
-    readyCallback: () => any
+    readyCallback: () => any,
+    collectionTypes: {[key in StreamTypes]?: boolean}  // note: while keys are marked as optional here, they are not
 }
 
 export class GDB {
@@ -27,36 +27,39 @@ export class GDB {
     private readonly stdin: Writable;
     private readonly emitter: TypedEventEmitter<GDBEventMap>;
 
+    private readonly collectionTypes: {[key in StreamTypes]?: boolean};
     private collecting: boolean = false;
     private collector: string[][] = [];
     private collectingProcessOut: boolean = false;
     private processOutCollector: string[] = [];
 
-    private stack: [(event: ResultEvent | StatusEvent) => any, (reason: string) => any][] = [];  // resolve, reject
-
     private ready: boolean = false;
     private readonly readyCallback: () => any;
+    private readonly stack: [(event: ResultEvent | StatusEvent) => any, (reason: string) => any][] = [];  // resolve, reject
 
-    constructor (target: string, args: string | string[] = [], options: Partial<Options> = {}) {
-        let fullOptions: Options = {
+    constructor (target: string, args: string | string[] = [], opt: Partial<Options> = {}) {
+        let options : Options = {
             spawn: {},
             gdbExecutable: "gdb",
-            exitHandler: () => {
-                process.exit();
-            },
             debug: false,
             readyCallback: () => {},
-            ...options
+            ...opt,
+            collectionTypes: {
+                [StreamTypes.CONSOLE] : true,
+                [StreamTypes.INTERNAL] : false,
+                [StreamTypes.TARGET] : false,
+                ...(opt.collectionTypes === undefined ? {} : opt.collectionTypes)
+            }
         };
-        this.readyCallback = fullOptions.readyCallback;
+        this.readyCallback = options.readyCallback;
+        this.collectionTypes = options.collectionTypes;
 
         if (typeof args === "string") {
             args = args.split(" ");
         }
         args.unshift(target, "-i=mi3");
-
         this.process = child_process.spawn(
-            fullOptions.gdbExecutable,
+            options.gdbExecutable,
             args,
             {stdio: ["pipe", "pipe", "inherit"], ...options.spawn}
         );
@@ -64,11 +67,10 @@ export class GDB {
         this.emitter = new TypedEventEmitter<GDBEventMap>();
         this.stdin = this.process.stdin!;
         this.stdout = readline.createInterface(this.process.stdout!);
-        if (fullOptions.debug) {
+        if (options.debug) {
             this.stdout.on("line", console.log);
         }
         this.stdout.on("line", this.processLine.bind(this));
-        this.process.on("exit", fullOptions.exitHandler);
     }
 
     public get gdbProcess () {
@@ -79,9 +81,8 @@ export class GDB {
         return this.emitter;
     }
 
-    public exit (): never {
+    public kill () {
         this.process.kill();
-        process.exit();
     }
 
 
@@ -120,7 +121,7 @@ export class GDB {
                 break;
 
             case "(":
-                if (this.ready) return;
+                if (this.ready || line !== "(gdb) ") return;
 
                 this.ready = true;
                 this.emitter.emit("ready");
@@ -148,7 +149,7 @@ export class GDB {
     }
 
     private processResult (event: ResultEvent) {
-        // note: running is deprecated
+        // note: "^running" is deprecated
         if (event.eventType === ResultTypes.EXIT || event.eventType === ResultTypes.RUNNING) {
             return;
         }
@@ -174,7 +175,7 @@ export class GDB {
     }
 
     private processStream (event: StreamEvent) {
-        if (this.collecting && event.eventType === StreamTypes.CONSOLE) {
+        if (this.collecting && this.collectionTypes[event.eventType]) {
             this.collector.push(event.data);
         }
     }
@@ -192,20 +193,20 @@ export class GDB {
         }
     }
 
-    public async execute (command: string, collectProcessOut: boolean = false) {
+    public execute (command: string | null, collectProcessOut: boolean = false) {
         this.collectingProcessOut = collectProcessOut;
-        this.writeCommand(command);
+        if (command !== null) this.writeCommand(command);
 
         return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
     }
     public ex = this.execute;
 
-    public async collect_execute (command: string, collectProcessOut: boolean = false) {
+    public execute_collect (command: string | null, collectProcessOut: boolean = false) {
         if (this.collecting) return Promise.reject("Another collection command is active");
 
         this.collecting = true;
         this.collectingProcessOut = collectProcessOut;
-        this.writeCommand(command);
+        if (command !== null) this.writeCommand(command);
 
         return new Promise<[ResultEvent | StatusEvent, string[][]]>((resolve, reject) => {
             this.stack.push([
@@ -225,13 +226,17 @@ export class GDB {
             ]);
         })
     }
-    public exc = this.collect_execute;
+    public exc = this.execute_collect;
 
-    public async next_stop (collectProcessOut: boolean = false) {
-        this.collectingProcessOut = collectProcessOut;
-        return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
+    public next_stop (collectProcessOut: boolean = false) {
+        return this.execute(null, collectProcessOut);
     }
     public ns = this.next_stop;
+
+    public next_stop_collect (collectProcessOut: boolean = false) {
+        return this.execute_collect(null, collectProcessOut);
+    }
+    public nsc = this.next_stop_collect;
 
     // write raw content such as a process requesting from stdin
     public externalWrite (data: string) {
