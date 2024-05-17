@@ -29,7 +29,7 @@ export class GDB {
 
     private collecting: boolean = false;
     private collector: string[][] = [];
-    private stack: [(event: ResultEvent) => any, (reason: string) => any][] = [];  // resolve, reject
+    private stack: [(event: ResultEvent | StatusEvent) => any, (reason: string) => any][] = [];  // resolve, reject
 
     private ready: boolean = false;
     private readonly readyCallback: () => any;
@@ -81,9 +81,9 @@ export class GDB {
         return this.emitter;
     }
 
-    private exit (code: number) : never {
+    public exit () : never {
         this.process.kill();
-        process.exit(code);
+        process.exit();
     }
 
 
@@ -135,13 +135,17 @@ export class GDB {
         }
     }
 
-    private processResult (event: ResultEvent) {
-        if (event.eventType === ResultTypes.EXIT) {
+    private notifyCaller (event: ResultEvent | StatusEvent) {
+        if (this.stack.length === 0) {
             return;
         }
 
-        if (this.stack.length === 0) {
-            console.error("Received result for non-existent command");
+        this.stack.pop()![0](event);
+    }
+
+    private processResult (event: ResultEvent) {
+        // note: running is deprecated
+        if (event.eventType === ResultTypes.EXIT || event.eventType === ResultTypes.RUNNING) {
             return;
         }
 
@@ -150,10 +154,12 @@ export class GDB {
             return;
         }
 
-        this.stack.pop()![0](event);
+        this.notifyCaller(event);
     }
 
-    private processStatus (event: StatusEvent) {}
+    private processStatus (event: StatusEvent) {
+        this.notifyCaller(event);
+    }
 
     private processStream (event: StreamEvent) {
         if (this.collecting && event.eventType === StreamTypes.CONSOLE) {
@@ -176,7 +182,7 @@ export class GDB {
 
     public async execute (command: string) {
         this.writeCommand(command);
-        return new Promise<ResultEvent>((resolve, reject) => this.stack.push([resolve, reject]));
+        return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
     }
     public ex = this.execute;
 
@@ -186,7 +192,7 @@ export class GDB {
         this.writeCommand(command);
         this.collecting = true;
 
-        return new Promise<[ResultEvent, string[][]]>((resolve, reject) => {
+        return new Promise<[ResultEvent | StatusEvent, string[][]]>((resolve, reject) => {
             this.stack.push([
                 (event) => {
                     this.collecting = false;
@@ -206,8 +212,13 @@ export class GDB {
     }
     public exc = this.collect_execute;
 
+    public async next_stop () {
+        return new Promise<ResultEvent | StatusEvent>((resolve, reject) => this.stack.push([resolve, reject]));
+    }
+    public ns = this.next_stop;
+
     // write raw content such as a process requesting from stdin
-    public external_write (data: string) {
+    public externalWrite (data: string) {
         this.writeCommand(data);
     }
 }
